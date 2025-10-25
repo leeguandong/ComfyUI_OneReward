@@ -4,6 +4,8 @@
 import torch
 import numpy as np
 from PIL import Image
+import os
+import folder_paths
 import comfy.model_management as mm
 
 
@@ -14,6 +16,12 @@ class OneRewardModelLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "model_path": ("STRING", {
+                    "default": "bytedance-research/OneReward"
+                }),
+                "base_model_path": ("STRING", {
+                    "default": "black-forest-labs/FLUX.1-Fill-dev"
+                }),
                 "model_type": (["OneReward", "OneRewardDynamic"],),
             }
         }
@@ -23,7 +31,7 @@ class OneRewardModelLoader:
     FUNCTION = "load_model"
     CATEGORY = "OneReward"
 
-    def load_model(self, model_type):
+    def load_model(self, model_path, base_model_path, model_type):
         from diffusers import FluxTransformer2DModel
         from .pipeline_flux_fill_with_cfg import FluxFillCFGPipeline
         
@@ -33,18 +41,21 @@ class OneRewardModelLoader:
         else:
             subfolder = "flux.1-fill-dev-OneRewardDynamic-transformer"
         
-        print(f"[OneReward] Loading {model_type} model...")
+        # print(f"[OneReward] Loading {model_type} model...")
+        # print(f"[OneReward] Model path: {model_path}")
+        # print(f"[OneReward] Base model path: {base_model_path}")
+        # print(f"[OneReward] Subfolder: {subfolder}")
         
         # 加载 transformer
         transformer = FluxTransformer2DModel.from_pretrained(
-            "bytedance-research/OneReward",
+            model_path,
             subfolder=subfolder,
             torch_dtype=torch.bfloat16
         )
         
         # 加载 pipeline
         pipe = FluxFillCFGPipeline.from_pretrained(
-            "black-forest-labs/FLUX.1-Fill-dev",
+            base_model_path,
             transformer=transformer,
             torch_dtype=torch.bfloat16
         )
@@ -53,7 +64,7 @@ class OneRewardModelLoader:
         device = mm.get_torch_device()
         pipe = pipe.to(device)
         
-        print(f"[OneReward] Model loaded successfully!")
+        print(f"[OneReward] Model loaded successfully on {device}!")
         
         return (pipe,)
 
@@ -67,7 +78,7 @@ class OneRewardSampler:
             "required": {
                 "pipe": ("ONEREWARD_PIPE",),
                 "image": ("IMAGE",),
-                "mask": ("IMAGE",),  # ComfyUI mask 作为 IMAGE 输入
+                "mask": ("MASK",),  # 使用正确的 MASK 类型
                 "prompt": ("STRING", {
                     "multiline": True,
                     "default": ""
@@ -111,16 +122,25 @@ class OneRewardSampler:
         image_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
         pil_image = Image.fromarray(image_np)
         
-        # 转换 mask to PIL
-        mask_np = (mask[0].cpu().numpy() * 255).astype(np.uint8)
-        pil_mask = Image.fromarray(mask_np).convert('L')
+        # 转换 ComfyUI mask format (H,W) or (B,H,W) to PIL
+        # ComfyUI 的 MASK 类型通常是 (H,W) 或 (B,H,W)，值在 0-1 之间
+        if len(mask.shape) == 3:
+            mask_np = mask[0].cpu().numpy()
+        else:
+            mask_np = mask.cpu().numpy()
+        
+        # 转换为 0-255 范围
+        mask_np = (mask_np * 255).astype(np.uint8)
+        pil_mask = Image.fromarray(mask_np, mode='L')
         
         # 创建生成器
         generator = torch.Generator("cpu").manual_seed(seed)
         
         print(f"[OneReward] Sampling...")
-        print(f"[OneReward] Prompt: {prompt[:100]}...")
-        print(f"[OneReward] Steps: {num_inference_steps}, CFG: {true_cfg}")
+        # print(f"[OneReward] Image size: {pil_image.size}")
+        # print(f"[OneReward] Mask size: {pil_mask.size}")
+        # print(f"[OneReward] Prompt: {prompt[:100] if prompt else 'empty'}...")
+        print(f"[OneReward] Steps: {num_inference_steps}, True CFG: {true_cfg}, Guidance Scale: {guidance_scale}")
         
         # 执行推理（完全按照原始代码的参数）
         result = pipe(
@@ -138,7 +158,7 @@ class OneRewardSampler:
         
         print(f"[OneReward] Done!")
         
-        # 转换回 ComfyUI 格式
+        # 转换回 ComfyUI 格式 (B,H,W,C)
         result_np = np.array(result).astype(np.float32) / 255.0
         result_tensor = torch.from_numpy(result_np)[None,]
         
